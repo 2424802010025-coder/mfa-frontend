@@ -3,8 +3,7 @@ import io from 'socket.io-client';
 import axios from 'axios';
 
 const BACKEND_URL = 'http://localhost:5000';
-const API_URL = `${BACKEND_URL}/api/auth`;
-
+const API_URL = 'https://mfa-backend-5ast.onrender.com';
 // Lấy hoặc khởi tạo Device ID cố định cho trình duyệt này
 let deviceId = localStorage.getItem('mfa_device_id');
 if (!deviceId) {
