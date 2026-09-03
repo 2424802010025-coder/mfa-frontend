@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 
-const API_URL = 'https://mfa-backend-5ast.onrender.com';
+const API_URL = import.meta.env.VITE_API_URL || 'https://mfa-backend-5ast.onrender.com';
 
 // Lấy hoặc khởi tạo Device ID cố định cho trình duyệt này
 let deviceId = localStorage.getItem('mfa_device_id');
@@ -23,16 +23,22 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState('');
 
   useEffect(() => {
-    // Kết nối Socket.io tới đường dẫn Render API
+    // 1. Khởi tạo kết nối Socket.io
     const newSocket = io(API_URL);
     setSocket(newSocket);
 
-    // Lắng nghe cảnh báo yêu cầu phê duyệt (cho Máy Tin Cậy)
+    // 2. Khôi phục phòng Socket nếu đã từng đăng nhập trước đó (Giúp F5 không bị mất kết nối)
+    const savedUserId = localStorage.getItem('mfa_user_id');
+    if (savedUserId) {
+      newSocket.emit('join_user_room', savedUserId);
+    }
+
+    // 3. Lắng nghe cảnh báo yêu cầu phê duyệt (Máy Tin Cậy)
     newSocket.on('mfa_approval_request', (data) => {
       setMfaRequest(data);
     });
 
-    // Lắng nghe kết quả phê duyệt Real-time (cho Máy Lạ)
+    // 4. Lắng nghe kết quả phê duyệt Real-time (Máy Lạ)
     newSocket.on('mfa_result', (result) => {
       setMfaWaiting(false);
       if (result.status === 'APPROVED') {
@@ -69,7 +75,10 @@ export default function App() {
         setUser({ token: res.data.token, userId: res.data.userId });
         setStatusMsg(`🎉 Đăng nhập thành công! (Trust Score: ${res.data.trustScore})`);
         
-        if (socket) socket.emit('join_user_room', res.data.userId || 1);
+        if (res.data.userId) {
+          localStorage.setItem('mfa_user_id', res.data.userId);
+          if (socket) socket.emit('join_user_room', res.data.userId);
+        }
       } else if (res.data.status === 'MFA_REQUIRED') {
         setMfaWaiting(true);
         setStatusMsg('⚠️ Thiết bị lạ! Đã gửi yêu cầu phê duyệt tới máy tin cậy.');
@@ -86,7 +95,7 @@ export default function App() {
       return;
     }
 
-    // Bật xác thực Sinh trắc học (Windows Hello / Touch ID / Vân tay)
+    // Bật xác thực Sinh trắc học (Windows Hello / Touch ID) có cơ chế Fallback
     if (window.PublicKeyCredential) {
       try {
         const challenge = new Uint8Array(32);
@@ -96,13 +105,16 @@ export default function App() {
           publicKey: {
             challenge: challenge,
             timeout: 60000,
-            userVerification: 'required'
+            userVerification: 'preferred'
           }
         });
 
         sendApproveRequest(true);
       } catch (bioErr) {
-        alert('❌ Xác thực sinh trắc học bị hủy hoặc thất bại!');
+        console.warn("Xác thực sinh trắc học bỏ qua/lỗi:", bioErr);
+        if (confirm('Xác thực sinh trắc học không thành công hoặc bị hủy. Bạn vẫn muốn Phê duyệt chứ?')) {
+          sendApproveRequest(true);
+        }
       }
     } else {
       sendApproveRequest(true);
@@ -120,6 +132,11 @@ export default function App() {
     } catch (err) {
       alert('Lỗi phê duyệt: ' + err.message);
     }
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('mfa_user_id');
   };
 
   return (
@@ -150,7 +167,7 @@ export default function App() {
         <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
           <h3>🎉 Đã Đăng Nhập Thành Công!</h3>
           <p style={{ fontSize: '12px', wordBreak: 'break-all' }}><b>Token:</b> {user.token}</p>
-          <button onClick={() => setUser(null)} style={{ padding: '8px 15px', cursor: 'pointer' }}>Đăng xuất</button>
+          <button onClick={handleLogout} style={{ padding: '8px 15px', cursor: 'pointer' }}>Đăng xuất</button>
         </div>
       ) : mfaWaiting ? (
         <div style={{ textAlign: 'center', padding: '20px', border: '1px dashed #faad14', borderRadius: '8px' }}>
