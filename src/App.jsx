@@ -81,13 +81,42 @@ export default function App() {
   };
 
   const handleApprove = async (approved) => {
+    if (!approved) {
+      sendApproveRequest(false);
+      return;
+    }
+
+    // Bật xác thực Sinh trắc học (Windows Hello / Touch ID / Vân tay)
+    if (window.PublicKeyCredential) {
+      try {
+        const challenge = new Uint8Array(32);
+        window.crypto.getRandomValues(challenge);
+
+        await navigator.credentials.get({
+          publicKey: {
+            challenge: challenge,
+            timeout: 60000,
+            userVerification: 'required'
+          }
+        });
+
+        sendApproveRequest(true);
+      } catch (bioErr) {
+        alert('❌ Xác thực sinh trắc học bị hủy hoặc thất bại!');
+      }
+    } else {
+      sendApproveRequest(true);
+    }
+  };
+
+  const sendApproveRequest = async (approved) => {
     try {
       await axios.post(`${API_URL}/approve-mfa`, {
         sessionId: mfaRequest.sessionId,
         approved
       });
       setMfaRequest(null);
-      setStatusMsg(approved ? '✅ Đã phê duyệt cho thiết bị mới!' : '⛔ Đã từ chối thiết bị mới.');
+      setStatusMsg(approved ? '✅ Đã phê duyệt cho thiết bị mới!' : '⛔ Đã từ chối.');
     } catch (err) {
       alert('Lỗi phê duyệt: ' + err.message);
     }
