@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 
-const BACKEND_URL = 'http://localhost:5000';
 const API_URL = 'https://mfa-backend-5ast.onrender.com';
+
 // Lấy hoặc khởi tạo Device ID cố định cho trình duyệt này
 let deviceId = localStorage.getItem('mfa_device_id');
 if (!deviceId) {
@@ -23,7 +23,8 @@ export default function App() {
   const [statusMsg, setStatusMsg] = useState('');
 
   useEffect(() => {
-    const newSocket = io(BACKEND_URL);
+    // Kết nối Socket.io tới đường dẫn Render API
+    const newSocket = io(API_URL);
     setSocket(newSocket);
 
     // Lắng nghe cảnh báo yêu cầu phê duyệt (cho Máy Tin Cậy)
