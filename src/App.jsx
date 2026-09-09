@@ -23,7 +23,6 @@ export default function App() {
   const [mfaRequest, setMfaRequest] = useState(null);
   const [statusMsg, setStatusMsg] = useState({ text: '', type: '' });
 
-  // 🛠️ Thêm state kiểm tra tài khoản đã đăng ký Passkey chưa
   const [hasPasskey, setHasPasskey] = useState(false);
 
   useEffect(() => {
@@ -55,13 +54,11 @@ export default function App() {
     return () => newSocket.close();
   }, []);
 
-  // 🛠️ Kiểm tra xem User đã có Passkey chưa mỗi khi đăng nhập thành công
   const checkPasskeyStatus = async (userId) => {
     try {
       const res = await axios.get(`${API_URL}/api/passkey/status/${userId}`);
       setHasPasskey(res.data.hasPasskey);
     } catch (err) {
-      // Nếu API status chưa có ở Backend, mặc định dùng localStorage làm fallback
       const registered = localStorage.getItem(`passkey_registered_${userId}`);
       setHasPasskey(!!registered);
     }
@@ -98,7 +95,7 @@ export default function App() {
           if (data.userId) {
             localStorage.setItem('mfa_user_id', data.userId);
             if (socket) socket.emit('join_user_room', data.userId);
-            checkPasskeyStatus(data.userId); // Kiểm tra Passkey
+            checkPasskeyStatus(data.userId);
           }
         } 
         else if (data.status === 'MFA_REQUIRED' && data.action === 'REQUIRE_CROSS_DEVICE_APPROVAL') {
@@ -149,8 +146,6 @@ export default function App() {
       });
 
       alert(verifyRes.data.message || 'Cài đặt Passkey thành công!');
-      
-      // 🛠️ Đăng ký thành công -> Đánh dấu & Ẩn nút ngay lập tức
       setHasPasskey(true);
       localStorage.setItem(`passkey_registered_${user.userId}`, 'true');
     } catch (err) {
@@ -218,7 +213,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Pop-up Phê duyệt Cross-Device */}
       {mfaRequest && (
         <div className="mfa-alert">
           <h4 style={{ color: '#ef4444', margin: '0 0 8px 0' }}>🚨 PHÊ DUYỆT TRUY CẬP</h4>
@@ -230,7 +224,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Màn hình Dashboard khi đã đăng nhập */}
       {user ? (
         <div className="dashboard-card">
           <div className="badge-trust">
@@ -239,7 +232,6 @@ export default function App() {
           <h3 style={{ margin: '0 0 20px 0' }}>Xin chào, {user.username || 'User'}! 👋</h3>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {/* 🛠️ CHỈ HIỆN NÚT ĐĂNG KÝ NẾU CHƯA CÓ PASSKEY */}
             {!hasPasskey && (
               <button className="btn-secondary" onClick={handleRegisterPasskey}>
                 🔑 Đăng ký Vân Tay / Passkey
@@ -259,7 +251,6 @@ export default function App() {
           </p>
         </div>
       ) : (
-        /* Form Đăng nhập / Đăng ký */
         <form onSubmit={handleAuth} className="form-group">
           <h3 style={{ margin: '0 0 8px 0', fontSize: '18px' }}>
             {isRegistering ? 'Tạo tài khoản mới' : 'Đăng nhập hệ thống'}
