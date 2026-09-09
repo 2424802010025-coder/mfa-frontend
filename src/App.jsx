@@ -24,7 +24,10 @@ export default function App() {
 
   useEffect(() => {
     // 1. Khởi tạo kết nối Socket.io
-    const newSocket = io(API_URL);
+    const newSocket = io(API_URL, {
+       transports: ['websocket', 'polling'],
+       withCredentials: true
+    });
     setSocket(newSocket);
 
     // 2. Khôi phục phòng Socket nếu đã từng đăng nhập trước đó (Giúp F5 không bị mất kết nối)
