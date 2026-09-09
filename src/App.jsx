@@ -1,10 +1,11 @@
+import './App.css';
 import { useState, useEffect } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
+import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 
-const API_URL = import.meta.env.VITE_API_URL || 'https://mfa-backend-5ast.onrender.com';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
-// Lấy hoặc khởi tạo Device ID cố định cho trình duyệt này
 let deviceId = localStorage.getItem('mfa_device_id');
 if (!deviceId) {
   deviceId = 'device_' + Math.random().toString(36).substring(2, 9);
@@ -20,75 +21,140 @@ export default function App() {
 
   const [mfaWaiting, setMfaWaiting] = useState(false);
   const [mfaRequest, setMfaRequest] = useState(null);
-  const [statusMsg, setStatusMsg] = useState('');
+  const [statusMsg, setStatusMsg] = useState({ text: '', type: '' });
+
+  // 🛠️ Thêm state kiểm tra tài khoản đã đăng ký Passkey chưa
+  const [hasPasskey, setHasPasskey] = useState(false);
 
   useEffect(() => {
-    // 1. Khởi tạo kết nối Socket.io
     const newSocket = io(API_URL, {
-       transports: ['websocket', 'polling'],
-       withCredentials: true
+      transports: ['websocket', 'polling'],
+      withCredentials: true
     });
     setSocket(newSocket);
 
-    // 2. Khôi phục phòng Socket nếu đã từng đăng nhập trước đó (Giúp F5 không bị mất kết nối)
     const savedUserId = localStorage.getItem('mfa_user_id');
     if (savedUserId) {
       newSocket.emit('join_user_room', savedUserId);
     }
 
-    // 3. Lắng nghe cảnh báo yêu cầu phê duyệt (Máy Tin Cậy)
     newSocket.on('mfa_approval_request', (data) => {
       setMfaRequest(data);
     });
 
-    // 4. Lắng nghe kết quả phê duyệt Real-time (Máy Lạ)
     newSocket.on('mfa_result', (result) => {
       setMfaWaiting(false);
       if (result.status === 'APPROVED') {
         setUser({ token: result.token });
-        setStatusMsg('✅ Phê duyệt thành công! Đã đăng nhập.');
+        setStatusMsg({ text: '✅ Phê duyệt thành công! Đã đăng nhập.', type: 'success' });
       } else {
-        setStatusMsg('❌ Yêu cầu đăng nhập bị từ chối.');
+        setStatusMsg({ text: '❌ Yêu cầu đăng nhập bị từ chối.', type: 'error' });
       }
     });
 
     return () => newSocket.close();
   }, []);
 
+  // 🛠️ Kiểm tra xem User đã có Passkey chưa mỗi khi đăng nhập thành công
+  const checkPasskeyStatus = async (userId) => {
+    try {
+      const res = await axios.get(`${API_URL}/api/passkey/status/${userId}`);
+      setHasPasskey(res.data.hasPasskey);
+    } catch (err) {
+      // Nếu API status chưa có ở Backend, mặc định dùng localStorage làm fallback
+      const registered = localStorage.getItem(`passkey_registered_${userId}`);
+      setHasPasskey(!!registered);
+    }
+  };
+
   const handleAuth = async (e) => {
     e.preventDefault();
-    setStatusMsg('');
-    const endpoint = isRegistering ? '/register' : '/login';
+    setStatusMsg({ text: '', type: '' });
 
     try {
-      const res = await axios.post(`${API_URL}${endpoint}`, {
-        username,
-        password,
-        deviceId,
-        deviceName: 'Trình duyệt Web'
-      });
-
       if (isRegistering) {
-        setStatusMsg('✅ Đăng ký thành công! Bạn có thể đăng nhập ngay.');
-        setIsRegistering(false);
-        return;
-      }
+        await axios.post(`${API_URL}/api/auth/register`, {
+          username,
+          password,
+          deviceId,
+          deviceName: 'Trình duyệt Web'
+        });
 
-      if (res.data.status === 'SUCCESS') {
-        setUser({ token: res.data.token, userId: res.data.userId });
-        setStatusMsg(`🎉 Đăng nhập thành công! (Trust Score: ${res.data.trustScore})`);
-        
-        if (res.data.userId) {
-          localStorage.setItem('mfa_user_id', res.data.userId);
-          if (socket) socket.emit('join_user_room', res.data.userId);
+        setStatusMsg({ text: '✅ Đăng ký thành công! Vui lòng đăng nhập.', type: 'success' });
+        setIsRegistering(false);
+      } else {
+        const res = await axios.post(`${API_URL}/api/auth/login`, {
+          username,
+          password,
+          deviceId
+        });
+
+        const data = res.data;
+
+        if (data.status === 'SUCCESS') {
+          setUser({ token: data.token, userId: data.userId, username, trustScore: data.trustScore ?? 100 });
+          setStatusMsg({ text: '🎉 Đăng nhập thành công!', type: 'success' });
+
+          if (data.userId) {
+            localStorage.setItem('mfa_user_id', data.userId);
+            if (socket) socket.emit('join_user_room', data.userId);
+            checkPasskeyStatus(data.userId); // Kiểm tra Passkey
+          }
+        } 
+        else if (data.status === 'MFA_REQUIRED' && data.action === 'REQUIRE_CROSS_DEVICE_APPROVAL') {
+          setMfaWaiting(true);
+          setStatusMsg({ text: '⚠️ Thiết bị lạ! Đang gửi yêu cầu phê duyệt tới thiết bị tin cậy...', type: 'warning' });
+          if (socket && data.userId) socket.emit('join_user_room', data.userId);
+        } 
+        else if (data.status === 'MFA_REQUIRED' && data.action === 'REQUIRE_PASSKEY_BIOMETRIC') {
+          setStatusMsg({ text: '🔑 Điểm tin cậy thấp. Yêu cầu quét Passkey...', type: 'warning' });
+          await handlePasskeyLogin(data.userId);
         }
-      } else if (res.data.status === 'MFA_REQUIRED') {
-        setMfaWaiting(true);
-        setStatusMsg('⚠️ Thiết bị lạ! Đã gửi yêu cầu phê duyệt tới máy tin cậy.');
-        if (socket) socket.emit('join_user_room', res.data.userId);
       }
     } catch (err) {
-      setStatusMsg('❌ ' + (err.response?.data?.error || 'Lỗi kết nối máy chủ'));
+      setStatusMsg({ text: '❌ ' + (err.response?.data?.error || 'Lỗi kết nối máy chủ'), type: 'error' });
+    }
+  };
+
+  const handlePasskeyLogin = async (userId) => {
+    try {
+      const optsRes = await axios.post(`${API_URL}/api/passkey/login-options`, { userId });
+      const asseResp = await startAuthentication({ optionsJSON: optsRes.data });
+
+      const verifyRes = await axios.post(`${API_URL}/api/passkey/login-verify`, {
+        userId,
+        credentialResponse: asseResp
+      });
+
+      if (verifyRes.data.status === 'SUCCESS') {
+        setUser({ token: verifyRes.data.token, userId, username });
+        setStatusMsg({ text: '🎉 Xác thực sinh trắc học thành công!', type: 'success' });
+        localStorage.setItem('mfa_user_id', userId);
+        checkPasskeyStatus(userId);
+      }
+    } catch (err) {
+      setStatusMsg({ text: '❌ Lỗi Passkey: ' + (err.response?.data?.error || err.message), type: 'error' });
+    }
+  };
+
+  const handleRegisterPasskey = async () => {
+    if (!user?.userId) return;
+    try {
+      const optsRes = await axios.post(`${API_URL}/api/passkey/register-options`, { userId: user.userId });
+      const attResp = await startRegistration({ optionsJSON: optsRes.data });
+
+      const verifyRes = await axios.post(`${API_URL}/api/passkey/register-verify`, {
+        userId: user.userId,
+        credentialResponse: attResp
+      });
+
+      alert(verifyRes.data.message || 'Cài đặt Passkey thành công!');
+      
+      // 🛠️ Đăng ký thành công -> Đánh dấu & Ẩn nút ngay lập tức
+      setHasPasskey(true);
+      localStorage.setItem(`passkey_registered_${user.userId}`, 'true');
+    } catch (err) {
+      alert('Lỗi đăng ký Passkey: ' + (err.response?.data?.error || err.message));
     }
   };
 
@@ -98,24 +164,18 @@ export default function App() {
       return;
     }
 
-    // Bật xác thực Sinh trắc học (Windows Hello / Touch ID) có cơ chế Fallback
     if (window.PublicKeyCredential) {
       try {
         const challenge = new Uint8Array(32);
         window.crypto.getRandomValues(challenge);
 
         await navigator.credentials.get({
-          publicKey: {
-            challenge: challenge,
-            timeout: 60000,
-            userVerification: 'preferred'
-          }
+          publicKey: { challenge, timeout: 60000, userVerification: 'preferred' }
         });
 
         sendApproveRequest(true);
       } catch (bioErr) {
-        console.warn("Xác thực sinh trắc học bỏ qua/lỗi:", bioErr);
-        if (confirm('Xác thực sinh trắc học không thành công hoặc bị hủy. Bạn vẫn muốn Phê duyệt chứ?')) {
+        if (confirm('Xác thực sinh trắc học không hoàn tất. Bạn vẫn muốn Phê duyệt chứ?')) {
           sendApproveRequest(true);
         }
       }
@@ -126,12 +186,12 @@ export default function App() {
 
   const sendApproveRequest = async (approved) => {
     try {
-      await axios.post(`${API_URL}/approve-mfa`, {
+      await axios.post(`${API_URL}/api/auth/approve-mfa`, {
         sessionId: mfaRequest.sessionId,
         approved
       });
       setMfaRequest(null);
-      setStatusMsg(approved ? '✅ Đã phê duyệt cho thiết bị mới!' : '⛔ Đã từ chối.');
+      setStatusMsg({ text: approved ? '✅ Đã phê duyệt truy cập!' : '⛔ Đã từ chối.', type: approved ? 'success' : 'error' });
     } catch (err) {
       alert('Lỗi phê duyệt: ' + err.message);
     }
@@ -139,55 +199,95 @@ export default function App() {
 
   const handleLogout = () => {
     setUser(null);
+    setMfaWaiting(false);
+    setHasPasskey(false);
     localStorage.removeItem('mfa_user_id');
+    setStatusMsg({ text: '', type: '' });
   };
 
   return (
-    <div style={{ padding: '30px', fontFamily: 'Arial, sans-serif', maxWidth: '450px', margin: '40px auto', border: '1px solid #ccc', borderRadius: '10px', boxShadow: '0 4px 10px rgba(0,0,0,0.1)' }}>
-      <h2 style={{ textAlign: 'center' }}>🛡️ Adaptive MFA System</h2>
-      <p style={{ fontSize: '12px', color: '#666' }}><b>Device ID hiện tại:</b> <code>{deviceId}</code></p>
+    <div className="mfa-container">
+      <h2 className="mfa-title">🛡️ Adaptive MFA</h2>
+      <div className="device-badge">
+        Thiết bị: <code>{deviceId}</code>
+      </div>
 
-      {statusMsg && (
-        <div style={{ padding: '10px', background: '#eef', borderRadius: '5px', marginBottom: '15px', fontSize: '14px' }}>
-          {statusMsg}
+      {statusMsg.text && (
+        <div className={`status-box ${statusMsg.type}`}>
+          {statusMsg.text}
         </div>
       )}
 
-      {/* Popup Cảnh báo Phê duyệt dành cho Máy Tin Cậy */}
+      {/* Pop-up Phê duyệt Cross-Device */}
       {mfaRequest && (
-        <div style={{ border: '2px solid #ff4d4f', padding: '15px', borderRadius: '8px', background: '#fff2f0', marginBottom: '20px' }}>
-          <h3 style={{ color: '#cf1322', marginTop: 0 }}>🚨 CẢNH BÁO XÁC THỰC!</h3>
-          <p>{mfaRequest.message}</p>
-          <p><small>Mã thiết bị yêu cầu: {mfaRequest.deviceId}</small></p>
+        <div className="mfa-alert">
+          <h4 style={{ color: '#ef4444', margin: '0 0 8px 0' }}>🚨 PHÊ DUYỆT TRUY CẬP</h4>
+          <p style={{ fontSize: '13px', margin: '0 0 12px 0' }}>{mfaRequest.message}</p>
           <div style={{ display: 'flex', gap: '10px' }}>
-            <button onClick={() => handleApprove(true)} style={{ flex: 1, background: '#52c41a', color: 'white', padding: '8px', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Phê duyệt</button>
-            <button onClick={() => handleApprove(false)} style={{ flex: 1, background: '#ff4d4f', color: 'white', padding: '8px', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>Từ chối</button>
+            <button className="btn-primary" style={{ background: '#10b981' }} onClick={() => handleApprove(true)}>Phê duyệt</button>
+            <button className="btn-danger" onClick={() => handleApprove(false)}>Từ chối</button>
           </div>
         </div>
       )}
 
+      {/* Màn hình Dashboard khi đã đăng nhập */}
       {user ? (
-        <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', padding: '15px', borderRadius: '8px', textAlign: 'center' }}>
-          <h3>🎉 Đã Đăng Nhập Thành Công!</h3>
-          <p style={{ fontSize: '12px', wordBreak: 'break-all' }}><b>Token:</b> {user.token}</p>
-          <button onClick={handleLogout} style={{ padding: '8px 15px', cursor: 'pointer' }}>Đăng xuất</button>
+        <div className="dashboard-card">
+          <div className="badge-trust">
+            🛡️ Trust Score: {user.trustScore ?? 100} / 100
+          </div>
+          <h3 style={{ margin: '0 0 20px 0' }}>Xin chào, {user.username || 'User'}! 👋</h3>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* 🛠️ CHỈ HIỆN NÚT ĐĂNG KÝ NẾU CHƯA CÓ PASSKEY */}
+            {!hasPasskey && (
+              <button className="btn-secondary" onClick={handleRegisterPasskey}>
+                🔑 Đăng ký Vân Tay / Passkey
+              </button>
+            )}
+
+            <button className="btn-danger" onClick={handleLogout}>
+              Đăng xuất
+            </button>
+          </div>
         </div>
       ) : mfaWaiting ? (
-        <div style={{ textAlign: 'center', padding: '20px', border: '1px dashed #faad14', borderRadius: '8px' }}>
-          <p style={{ fontSize: '16px' }}>⏳ <b>Đang chờ phê duyệt từ máy tin cậy...</b></p>
-          <p style={{ fontSize: '13px', color: '#666' }}>Vui lòng mở ứng dụng trên thiết bị quen thuộc của bạn để bấm "Phê duyệt".</p>
+        <div style={{ textAlign: 'center', padding: '20px 0' }}>
+          <p style={{ fontSize: '16px', fontWeight: 600 }}>⏳ Đang chờ xác nhận...</p>
+          <p style={{ fontSize: '13px', color: 'var(--text-sub)' }}>
+            Vui lòng kiểm tra thiết bị đã đăng ký để bấm "Phê duyệt".
+          </p>
         </div>
       ) : (
-        <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <h3>{isRegistering ? 'Đăng ký tài khoản' : 'Đăng nhập'}</h3>
-          <input type="text" placeholder="Tên đăng nhập" value={username} onChange={e => setUsername(e.target.value)} required style={{ padding: '10px', borderRadius: '4px', border: '1px solid #ccc' }} />
-          <input type="password" placeholder="Mật khẩu" value={password} onChange={e => setPassword(e.target.value)} required style={{ padding: '10px', borderRadius: '4px', border: '1px solid #ccc' }} />
-          <button type="submit" style={{ padding: '10px', background: '#1890ff', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
-            {isRegistering ? 'Tạo tài khoản' : 'Đăng nhập'}
+        /* Form Đăng nhập / Đăng ký */
+        <form onSubmit={handleAuth} className="form-group">
+          <h3 style={{ margin: '0 0 8px 0', fontSize: '18px' }}>
+            {isRegistering ? 'Tạo tài khoản mới' : 'Đăng nhập hệ thống'}
+          </h3>
+          <input
+            type="text"
+            className="input-field"
+            placeholder="Tên đăng nhập"
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            required
+          />
+          <input
+            type="password"
+            className="input-field"
+            placeholder="Mật khẩu"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            required
+          />
+
+          <button type="submit" className="btn-primary">
+            {isRegistering ? 'Đăng ký ngay' : 'Đăng nhập'}
           </button>
-          <p style={{ cursor: 'pointer', color: '#1890ff', fontSize: '13px', textAlign: 'center', marginTop: '10px' }} onClick={() => setIsRegistering(!isRegistering)}>
+
+          <div className="toggle-link" onClick={() => setIsRegistering(!isRegistering)}>
             {isRegistering ? 'Đã có tài khoản? Đăng nhập' : 'Chưa có tài khoản? Đăng ký ngay'}
-          </p>
+          </div>
         </form>
       )}
     </div>
